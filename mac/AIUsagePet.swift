@@ -3678,10 +3678,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
     }
 
     /// Dock 아이콘 오른쪽 클릭 메뉴(「종료」는 macOS 가 붙여 준다)
-$1        menu.addItem(menuItem(T("지금 새로고침"), #selector(refreshAll)))
+    func applicationDockMenu(_ sender: NSApplication) -> NSMenu? {
+        let menu = NSMenu()
+        menu.addItem(menuItem(T("지금 새로고침"), #selector(refreshAll)))
         menu.addItem(menuItem(T("사용 추이…"), #selector(openTrend)))
         menu.addItem(.separator())
-        addGroupMenus(to: menu)$2
+        addGroupMenus(to: menu)
+        return menu
+    }
 
     /// 시스템 설정 → 일반 → 로그인 항목에 이 앱을 넣고 뺀다
     @objc private func toggleLoginItem() {
