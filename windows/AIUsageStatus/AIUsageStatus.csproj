@@ -9,7 +9,7 @@
     <RootNamespace>AIUsage</RootNamespace>
     <AssemblyName>AIUsageStatus</AssemblyName>
     <Product>AI 사용량</Product>
-    <Version>1.4.2</Version>
+    <Version>1.4.3</Version>
     <InvariantGlobalization>false</InvariantGlobalization>
     <SatelliteResourceLanguages>ko</SatelliteResourceLanguages>
   </PropertyGroup>

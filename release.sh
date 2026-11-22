@@ -70,6 +70,11 @@ print "올림: $tag — $(gh release view "$tag" -R $repo --json assets -q '.ass
 
 # README 「받기」 표: 그 판 줄(링크에 releases/download/<target>-v 가 든 줄)의 버전 칸과 링크를 새 판으로
 url="https://github.com/$repo/releases/download/$tag/${asset:t}"
+# GitHub Actions(mac-release.yml)에서 올릴 때는 README 커밋을 하지 않는다 — 그 커밋은 사람이 자기 이름으로 한다
+if [[ -n ${AIUSAGE_SKIP_README:-} ]]; then
+  print "README 받기 링크는 고치지 않음(AIUSAGE_SKIP_README) — 받기 링크: $url"
+  exit 0
+fi
 VERSION=$version URL=$url NAME=${asset:t} TARGET=$target perl -pi -e '
   if (m{releases/download/$ENV{TARGET}-v}) {
     s{^(\|[^|]*\|) [0-9.]+ \|}{$1 $ENV{VERSION} |};

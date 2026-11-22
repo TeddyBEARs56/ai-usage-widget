@@ -1122,69 +1122,240 @@ sealed class MainForm : Form
 
     // MARK: 메뉴(창 오른쪽 클릭)
 
+    // 메뉴: 위는 요약(세션 이름·상태, 회사마다 한도 한 줄), 아래는 묶음(보기·모양·알림·설정).
+    // 긴 글은 「…」로 줄이고 전체는 풍선(ToolTip)으로 — 세션 이름·경로 때문에 메뉴가 넓어지지 않게
+
+    const int MenuTextMax = 28;
+
+    static string Shorten(string text, int max = MenuTextMax) => text.Length <= max ? text : text[..(max - 1)].TrimEnd() + "…";
+
+    /// 누를 수 없는 회색 줄(긴 글은 줄이고 전체는 풍선)
+    static ToolStripMenuItem Info(string text) => new(Shorten(text, 40)) { Enabled = false, ToolTipText = text.Length > 40 ? text : null };
+
+    static readonly Dictionary<SessionTool, Bitmap> toolDots = new();
+
+    /// 세션 줄 앞의 작은 점(주황 Claude, 초록 Codex)
+    static Bitmap ToolDot(SessionTool tool)
+    {
+        if (toolDots.TryGetValue(tool, out var made)) return made;
+        var bitmap = new Bitmap(16, 16);
+        using (var g = Graphics.FromImage(bitmap))
+        {
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            using var brush = new SolidBrush(tool == SessionTool.Claude ? Palette.Claude : Palette.ChatGPT);
+            g.FillEllipse(brush, 4, 4, 8, 8);
+        }
+        return toolDots[tool] = bitmap;
+    }
+
+    /// 하위 메뉴(오른쪽에 지금 값을 흐리게)
+    static ToolStripMenuItem Group(string title, string? value = null)
+    {
+        // 하위 메뉴가 있는 항목은 WinForms 가 오른쪽 글(ShortcutKeyDisplayString)을 그리지 않아서, 값은 Tag 에 두고 MenuRenderer 가 그린다.
+        var item = new ToolStripMenuItem(title) { Tag = value };
+        if (item.DropDown is ToolStripDropDownMenu drop) drop.ShowItemToolTips = true;
+        return item;
+    }
+
+    /// 메뉴 그리기: 하위 메뉴 항목 오른쪽(화살표 앞)에 지금 값(Tag)을 흐리게
+    sealed class MenuRenderer : ToolStripProfessionalRenderer
+    {
+        protected override void OnRenderItemText(ToolStripItemTextRenderEventArgs e)
+        {
+            base.OnRenderItemText(e);
+            if (e.Item is not ToolStripMenuItem { HasDropDownItems: true, Tag: string value } item || e.Text != item.Text) return;
+            var size = TextRenderer.MeasureText(e.Graphics, value, e.TextFont, Size.Empty, TextFormatFlags.NoPadding);
+            // 항목의 Width 는 메뉴보다 넓게 잡힐 수 있어, 보이는 메뉴 폭에서 화살표 자리를 뺀 곳에 맞춘다
+            int right = e.ToolStrip.Width - item.Bounds.X - (int)(item.Height * 1.5);
+            var rect = new Rectangle(right - size.Width, e.TextRectangle.Top, size.Width, e.TextRectangle.Height);
+            TextRenderer.DrawText(e.Graphics, value, e.TextFont, rect, SystemColors.GrayText,
+                TextFormatFlags.NoPadding | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine | TextFormatFlags.NoPrefix);
+        }
+    }
+
+    readonly MenuRenderer menuRenderer = new();
+
+    /// 하위 메뉴까지 같은 그리기
+    void UseRenderer(ToolStripItemCollection items)
+    {
+        foreach (var item in items.OfType<ToolStripMenuItem>().Where(i => i.HasDropDownItems))
+        {
+            item.DropDown.Renderer = menuRenderer;
+            UseRenderer(item.DropDownItems);
+        }
+    }
+
     void OnMenuOpening(object? sender, CancelEventArgs e)
     {
         menu.Items.Clear();
-        foreach (var line in DetailLines()) menu.Items.Add(new ToolStripMenuItem(line) { Enabled = false });
+        menu.ShowItemToolTips = true;
+        var at = DateTimeOffset.Now;
+        if (taskbarProblem != null) menu.Items.Add(Info(T("작업 표시줄 대신 떠 있는 창 — {0}", taskbarProblem)));
+
+        // 세션: 이름(줄임)과 상태. 누르면 그 대화가 열리고, 풍선에 전체 이름·폴더
+        if (showSessions && sessions.Count > 0)
+        {
+            menu.Items.Add(new ToolStripMenuItem(T("세션")) { Enabled = false });
+            var (shown, hidden) = SessionRow.Visible(sessions);
+            foreach (var s in shown)
+                menu.Items.Add(new ToolStripMenuItem(Shorten(s.Name, 24), ToolDot(s.Tool), (_, _) => SessionOpener.Open(s))
+                {
+                    ShortcutKeyDisplayString = s.StatusText(at),
+                    ToolTipText = s.Describe(at),
+                });
+            if (hidden > 0) menu.Items.Add(Info(T("외 {0}개", hidden)));
+        }
+
+        // 남은 한도: 회사마다 한 줄(모델별 줄은 빼고), 오른쪽에 확인 시각. 초기화 시각·출처·오류는 「자세히」
+        menu.Items.Add(new ToolStripMenuItem(T("남은 한도")) { Enabled = false });
+        ToolStripMenuItem Summary(string name, ProviderSnapshot snap)
+        {
+            var windows = snap.Windows.Where(w => w.Name == null).ToList();
+            var text = windows.Count == 0 ? $"{name} · {snap.Message ?? T("값이 없습니다")}"
+                : $"{name}  " + string.Join(" · ", windows.Select(w => $"{w.Label} {w.LeftPercent(now)}%"));
+            return new ToolStripMenuItem(Shorten(text, 40))
+            {
+                Enabled = false,
+                ShortcutKeyDisplayString = snap.ObservedAt is { } seen ? Fmt.Clock(seen) : null,
+                ToolTipText = text.Length > 40 ? text : null,
+            };
+        }
+        foreach (var pane in order)
+        {
+            if (pane == Pane.Claude && showClaude) menu.Items.Add(Summary("Claude", claudeSnap));
+            if (pane == Pane.Codex && showCodex) menu.Items.Add(Summary("ChatGPT", codexSnap));
+        }
+        var details = Group(T("자세히"));
+        foreach (var line in DetailLines()) details.DropDownItems.Add(new ToolStripMenuItem(line) { Enabled = false });
+        menu.Items.Add(details);
+
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add(T("지금 새로고침"), null, (_, _) => RefreshAll());
         menu.Items.Add(T("사용 추이…"), null, (_, _) => OpenTrend());
-        menu.Items.Add(T("위치 초기화"), null, (_, _) => PlaceWindow(reset: true));
         menu.Items.Add(new ToolStripSeparator());
-        // 혼자 켜져 있는 Claude·ChatGPT 는 끌 수 없다(흐리게) — 맥판과 같은 자리·순서
-        menu.Items.Add(new ToolStripMenuItem(T("Claude 보이기"), null, (_, _) => SetShown(!showClaude, showCodex)) { Checked = showClaude, Enabled = showCodex });
-        menu.Items.Add(new ToolStripMenuItem(T("ChatGPT 보이기"), null, (_, _) => SetShown(showClaude, !showCodex)) { Checked = showCodex, Enabled = showClaude });
-        menu.Items.Add(new ToolStripMenuItem(T("세션 보이기"), null, (_, _) => ToggleSessionDisplay()) { Checked = showSessions });
-        var orderMenu = new ToolStripMenuItem(T("칸 순서"));
-        foreach (var choice in Settings.Orders)
-            orderMenu.DropDownItems.Add(new ToolStripMenuItem(string.Join(" → ", choice.Select(Settings.Title)), null, (_, _) => ChooseOrder(choice))
-            {
-                Checked = choice.SequenceEqual(order),
-            });
-        menu.Items.Add(orderMenu);
-        menu.Items.Add(new ToolStripMenuItem(T("모델별 한도 보이기 (Fable 등)"), null, (_, _) => ToggleModelDisplay()) { Checked = showModels });
+        menu.Items.Add(ViewMenu());
         menu.Items.Add(AppearanceMenu());
-        menu.Items.Add(LanguageMenu());
-        menu.Items.Add(new ToolStripSeparator());
-        menu.Items.Add(new ToolStripMenuItem(T("한도 알림"), null, (_, _) => ToggleAlerts()) { Checked = Settings.LimitAlerts });
-        menu.Items.Add(new ToolStripMenuItem(T("모델별 한도도 알림"), null, (_, _) => ToggleModelAlerts())
-            { Enabled = Settings.LimitAlerts, Checked = Settings.LimitAlerts && modelAlerts });
-        menu.Items.Add(new ToolStripMenuItem(T("Windows 시작할 때 자동으로 열기"), null, (_, _) => AutoStart.Set(!AutoStart.IsOn)) { Checked = AutoStart.IsOn });
-        menu.Items.Add(new ToolStripMenuItem(T("Claude Code 상태 표시줄 연결"), null, (_, _) => { ClaudeLink.Ask(fromMenu: true); RefreshLocal(); })
-        {
-            Checked = ClaudeSettings.State() == ClaudeSettings.LinkState.Connected,
-        });
-        if (!Installer.IsInstalled)
-            menu.Items.Add(T("설치(시작 메뉴에 등록)"), null, (_, _) => { if (Installer.InstallAndRelaunch(mutex)) Close(); });
-        menu.Items.Add(new ToolStripMenuItem(T("업데이트 확인 (지금 {0})", Updater.Current), null, (_, _) => CheckForUpdate(manual: true))
-        {
-            Enabled = !updating,
-        });
+        menu.Items.Add(AlertsMenu());
+        menu.Items.Add(SettingsMenu());
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add(T("종료"), null, (_, _) => Close());
+        menu.Renderer = menuRenderer;
+        UseRenderer(menu.Items);
         e.Cancel = false;  // 항목을 여기서 채우므로 열리게 둔다
     }
 
+    /// 보기: 어떤 칸을 보일지, 칸 순서, 모두 접기·펼치기
+    ToolStripMenuItem ViewMenu()
+    {
+        var root = Group(T("보기"));
+        // 혼자 켜져 있는 Claude·ChatGPT 는 끌 수 없다(흐리게) — 맥판과 같다
+        root.DropDownItems.Add(new ToolStripMenuItem(T("세션"), null, (_, _) => ToggleSessionDisplay()) { Checked = showSessions });
+        root.DropDownItems.Add(new ToolStripMenuItem("Claude", null, (_, _) => SetShown(!showClaude, showCodex)) { Checked = showClaude, Enabled = showCodex });
+        root.DropDownItems.Add(new ToolStripMenuItem("ChatGPT", null, (_, _) => SetShown(showClaude, !showCodex)) { Checked = showCodex, Enabled = showClaude });
+        root.DropDownItems.Add(new ToolStripMenuItem(T("모델별 한도 (Fable 등)"), null, (_, _) => ToggleModelDisplay()) { Checked = showModels });
+        root.DropDownItems.Add(new ToolStripSeparator());
+        root.DropDownItems.Add(OrderMenu());
+        bool anyFolded = sessionsFolded || claudeFolded || codexFolded, allFolded = sessionsFolded && claudeFolded && codexFolded;
+        root.DropDownItems.Add(new ToolStripMenuItem(T("모두 펼치기"), null, (_, _) => FoldAll(false)) { Enabled = anyFolded });
+        root.DropDownItems.Add(new ToolStripMenuItem(T("모두 접기"), null, (_, _) => FoldAll(true)) { Enabled = !allFolded });
+        return root;
+    }
+
+    /// 칸 순서: 지금 순서를 보여 주고, 누른 칸을 한 칸 위로(맨 위 칸은 흐리게)
+    ToolStripMenuItem OrderMenu()
+    {
+        var root = Group(T("칸 순서"));
+        root.DropDownItems.Add(new ToolStripMenuItem(T("지금: {0}", string.Join(" → ", order.Select(Settings.Title)))) { Enabled = false });
+        for (int i = 0; i < order.Length; i++)
+        {
+            var pane = order[i];
+            int index = i;
+            root.DropDownItems.Add(new ToolStripMenuItem(T("{0} 위로", Settings.Title(pane)), null, (_, _) =>
+            {
+                var next = order.ToArray();
+                (next[index - 1], next[index]) = (next[index], next[index - 1]);
+                if (Settings.Orders.FirstOrDefault(o => o.SequenceEqual(next)) is { } choice) ChooseOrder(choice);
+            }) { Enabled = index > 0 });
+        }
+        return root;
+    }
+
+    void FoldAll(bool fold)
+    {
+        int value = fold ? 1 : 0;
+        sessionsFolded = Settings.Save(Settings.FoldSessions, value, sessionsFolded ? 1 : 0) == 1;
+        claudeFolded = Settings.Save(Settings.FoldClaude, value, claudeFolded ? 1 : 0) == 1;
+        codexFolded = Settings.Save(Settings.FoldCodex, value, codexFolded ? 1 : 0) == 1;
+        UpdateSpin();
+        FitSize();
+        Redraw(gauge: false);
+    }
+
+    /// 모양: 표시 방식, 그리고 지금 모드에 맞는 것만(작업 표시줄이면 크기, 떠 있는 창이면 투명도·창 크기·글자 크기)
     ToolStripMenuItem AppearanceMenu()
     {
-        var root = new ToolStripMenuItem(T("모양"));
-        void AddGroup(Settings.PetSetting setting, string title, string[] labels, int current)
+        var root = Group(T("모양"), displayMode == 1 ? T("작업 표시줄") : T("떠 있는 창"));
+        void Radio(ToolStripItemCollection items, Settings.PetSetting setting, string[] labels, int current)
         {
-            if (root.DropDownItems.Count != 0) root.DropDownItems.Add(new ToolStripSeparator());
-            root.DropDownItems.Add(new ToolStripMenuItem(title) { Enabled = false });
             for (int i = 0; i < labels.Length; i++)
             {
                 int value = setting.Values[i];
-                root.DropDownItems.Add(new ToolStripMenuItem(labels[i], null, (_, _) => ChooseAppearance(setting, value))
-                    { Checked = value == current });
+                items.Add(new ToolStripMenuItem(labels[i], null, (_, _) => ChooseAppearance(setting, value)) { Checked = value == current });
             }
         }
+        void Choice(Settings.PetSetting setting, string title, string[] labels, int current)
+        {
+            int index = Array.IndexOf(setting.Values, current);
+            var item = Group(title, index >= 0 ? labels[index] : null);
+            Radio(item.DropDownItems, setting, labels, current);
+            root.DropDownItems.Add(item);
+        }
+        root.DropDownItems.Add(new ToolStripMenuItem(T("표시 방식")) { Enabled = false });
+        Radio(root.DropDownItems, Settings.DisplayMode, [T("떠 있는 창"), T("작업 표시줄 (간단 모드)")], displayMode);
+        root.DropDownItems.Add(new ToolStripSeparator());
         string[] sizes = [T("작게"), T("보통"), T("크게"), T("아주 크게")];
-        AddGroup(Settings.DisplayMode, T("표시 방식"), [T("떠 있는 창"), T("작업 표시줄 (간단 모드)")], displayMode);
-        AddGroup(Settings.TaskbarSize, T("작업 표시줄 크기"), [T("작게"), T("크게")], taskbarSize);
-        AddGroup(Settings.Background, T("배경 투명도"), [T("없음"), T("조금"), T("중간"), T("많이")], backgroundLevel);
-        AddGroup(Settings.WindowSize, T("창 크기"), sizes, windowPercent);
-        AddGroup(Settings.TextSize, T("글자 크기"), sizes, textPercent);
+        if (displayMode == 1)
+        {
+            root.DropDownItems.Add(new ToolStripMenuItem(T("작업 표시줄 크기")) { Enabled = false });
+            Radio(root.DropDownItems, Settings.TaskbarSize, [T("작게"), T("크게")], taskbarSize);
+        }
+        else
+        {
+            Choice(Settings.Background, T("배경 투명도"), [T("없음"), T("조금"), T("중간"), T("많이")], backgroundLevel);
+            Choice(Settings.WindowSize, T("창 크기"), sizes, windowPercent);
+            Choice(Settings.TextSize, T("글자 크기"), sizes, textPercent);
+        }
+        return root;
+    }
+
+    /// 알림: 한도 알림, 모델별 한도도 알림
+    ToolStripMenuItem AlertsMenu()
+    {
+        var root = Group(T("알림"), Settings.LimitAlerts ? T("켬") : T("끔"));
+        root.DropDownItems.Add(new ToolStripMenuItem(T("한도 알림"), null, (_, _) => ToggleAlerts()) { Checked = Settings.LimitAlerts });
+        root.DropDownItems.Add(new ToolStripMenuItem(T("모델별 한도도 알림"), null, (_, _) => ToggleModelAlerts())
+            { Enabled = Settings.LimitAlerts, Checked = Settings.LimitAlerts && modelAlerts });
+        return root;
+    }
+
+    /// 설정: 자동 실행, 상태 표시줄 연결, 언어, 위치 초기화, 설치·업데이트
+    ToolStripMenuItem SettingsMenu()
+    {
+        var root = Group(T("설정"));
+        root.DropDownItems.Add(new ToolStripMenuItem(T("Windows 시작할 때 자동으로 열기"), null, (_, _) => AutoStart.Set(!AutoStart.IsOn)) { Checked = AutoStart.IsOn });
+        root.DropDownItems.Add(new ToolStripMenuItem(T("Claude Code 상태 표시줄 연결"), null, (_, _) => { ClaudeLink.Ask(fromMenu: true); RefreshLocal(); })
+        {
+            Checked = ClaudeSettings.State() == ClaudeSettings.LinkState.Connected,
+        });
+        root.DropDownItems.Add(LanguageMenu());
+        root.DropDownItems.Add(new ToolStripSeparator());
+        root.DropDownItems.Add(T("위치 초기화"), null, (_, _) => PlaceWindow(reset: true));
+        if (!Installer.IsInstalled)
+            root.DropDownItems.Add(T("설치(시작 메뉴에 등록)"), null, (_, _) => { if (Installer.InstallAndRelaunch(mutex)) Close(); });
+        root.DropDownItems.Add(new ToolStripMenuItem(T("업데이트 확인 (지금 {0})", Updater.Current), null, (_, _) => CheckForUpdate(manual: true))
+        {
+            Enabled = !updating,
+        });
         return root;
     }
 
@@ -1278,7 +1449,6 @@ sealed class MainForm : Form
 
     IEnumerable<string> DetailLines()
     {
-        if (taskbarProblem != null) yield return T("작업 표시줄 대신 떠 있는 창 — {0}", taskbarProblem);
         IEnumerable<string> Values(string title, ProviderSnapshot snap)
         {
             yield return T("{0} · 마지막 값 {1}", title, snap.ObservedAt is { } at ? Fmt.FullTime(at) : T("없음"));
@@ -1289,10 +1459,6 @@ sealed class MainForm : Form
         {
             switch (pane)
             {
-                case Pane.Sessions when showSessions && sessions.Count > 0:
-                    yield return T("세션");
-                    foreach (var s in sessions) yield return "    " + s.Describe(DateTimeOffset.Now);
-                    break;
                 case Pane.Claude when showClaude:
                     foreach (var line in Values($"Claude ({claudeSnap.Source ?? T("Claude Code 상태 표시줄")})", claudeSnap)) yield return line;
                     // Claude 값이 오래됐고 데스크톱 앱 기록도 멈췄으면 다시 받게 하는 법을 알린다

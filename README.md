@@ -100,6 +100,8 @@ zsh release.sh mac "바뀐 점"        # mac/Info.plist 의 CFBundleShortVersion
 zsh release.sh windows "바뀐 점"    # windows/AIUsage·AIUsageStatus 의 csproj <Version>(예 1.1.0 → 1.1.1)을 먼저 올린다
 ```
 
-Windows 판은 Windows 에서도 올릴 수 있다(같은 검사·같은 순서, `gh` 필요): `powershell -ExecutionPolicy Bypass -File windows\release.ps1 "바뀐 점"`. 맥 판은 맥에서만 만든다.
+Windows 판은 Windows 에서도 올릴 수 있다(같은 검사·같은 순서, `gh` 필요): `powershell -ExecutionPolicy Bypass -File windows\release.ps1 "바뀐 점"`. 맥 판도 맥 없이 올릴 수 있다: `gh workflow run mac-release.yml -f notes="바뀐 점"` — GitHub 의 맥 머신이 `release.sh mac` 을 그대로 돌린다([`.github/workflows/mac-release.yml`](.github/workflows/mac-release.yml), 버전을 먼저 올려 push 해 둘 것). 이때는 README 받기 링크를 고치지 않으므로(`AIUSAGE_SKIP_README`), 올린 뒤 받기 표의 맥 줄을 새 판으로 고쳐 직접 커밋한다.
+
+맥 판 빌드 확인은 Windows 에서도 된다: GitHub 의 맥 머신(Actions, 공개 저장소라 무료)이 [`.github/workflows/mac-build.yml`](.github/workflows/mac-build.yml) 로 컴파일하고, 설치 묶음 zip 과 창·세션 패널·메뉴 막대 게이지 캡처(예시 값)를 artifact `mac-build` 로 남긴다. `mac/`·`i18n/` 을 바꾼 push 마다 저절로 돌고, 손으로는 `gh workflow run mac-build.yml` → `gh run watch` → `gh run download -n mac-build`. 메뉴처럼 캡처되지 않는 화면은 맥에서 직접 봐야 한다.
 
 `release.sh` 는 커밋 안 한 변경이 있거나 push 전이거나, 같은 버전·더 낮은 버전이면 멈춘다. 앱은 버전이 높을 때만 바꾸므로 버전을 안 올리고 올리면 아무도 안 바뀐다. 시험할 때는 `AIUSAGE_UPDATE_FEED`(Releases 목록 주소)·`AIUSAGE_UPDATE_DELAY`(첫 확인까지 초)로 바꿀 수 있다. 맥은 터미널에서 `AIUsagePet --check-update`(보기만)·`--update`(바로 바꾸기)도 된다.

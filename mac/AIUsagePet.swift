@@ -2635,7 +2635,7 @@ struct SessionPanelView: View {
     }
 }
 
-final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, UNUserNotificationCenterDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, NSMenuDelegate, UNUserNotificationCenterDelegate {
     private lazy var history = UsageHistory()
     private lazy var alerts = LimitAlerts()
     private let trends = TrendModel()
@@ -3066,9 +3066,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
             case .codex where model.showCodex:
                 add(T("ChatGPT (Codex 한도)"), model.codex)
                 lines.append(T("Codex 서버 확인 {0}", codex.serverCheckedAt.map(clock) ?? T("전")) + (codex.serverError.map { " — \($0)" } ?? ""))
-            case .sessions where model.showSessions && !model.sessions.isEmpty:
-                lines.append(T("세션"))
-                for s in model.sessions { lines.append("    " + describeSession(s, now: now)) }
             default:
                 break
             }
@@ -3082,25 +3079,109 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
         contextMenu().popUp(positioning: nil, at: point, in: view)
     }
 
-    /// 떠 있는 창·메뉴 막대 게이지의 오른쪽 클릭 메뉴(맨 위에 값 줄)
+    /// 떠 있는 창·메뉴 막대 게이지의 오른쪽 클릭 메뉴(Windows 판 1.4.3 과 같은 구조).
+    /// 위는 요약(세션 이름·상태, 회사마다 남은 한도 한 줄), 아래는 묶음(보기·모양·알림·설정). 긴 글은 「…」로 줄이고 전체는 풍선으로
     private func contextMenu() -> NSMenu {
         let menu = NSMenu()
+        let now = model.now
+        if model.showSessions && !model.sessions.isEmpty {
+            menu.addItem(menuHeader(T("세션")))
+            let shown = model.sessions.count <= 8 ? model.sessions : Array(model.sessions.prefix(7))
+            for s in shown {
+                let name = shortened(s.name, 24)
+                let item = menuItem(name, #selector(openSessionItem(_:)))
+                item.attributedTitle = rowTitle(name, sessionStatusText(s, now: now))
+                item.image = toolDot(s.tool)
+                item.toolTip = describeSession(s, now: now)
+                item.representedObject = s.id
+                menu.addItem(item)
+            }
+            if model.sessions.count > 8 { menu.addItem(menuHeader(T("외 {0}개", model.sessions.count - 7))) }
+        }
+        menu.addItem(menuHeader(T("남은 한도")))
+        for pane in model.order {
+            if pane == .claude && model.showClaude { menu.addItem(summaryItem("Claude", model.claude, now: now)) }
+            if pane == .codex && model.showCodex { menu.addItem(summaryItem("ChatGPT", model.codex, now: now)) }
+        }
+        let details = NSMenu()
         for line in detailLines() {
             let info = NSMenuItem(title: line, action: nil, keyEquivalent: "")
             info.isEnabled = false
-            menu.addItem(info)
+            details.addItem(info)
         }
+        menu.addItem(groupItem(T("자세히"), nil, details))
         menu.addItem(.separator())
         menu.addItem(menuItem(T("지금 새로고침"), #selector(refreshAll)))
         menu.addItem(menuItem(T("사용 추이…"), #selector(openTrend)))
-        menu.addItem(menuItem(T("위치 초기화"), #selector(resetPosition)))
-        addShownItems(to: menu)
-        menu.addItem(menuItem(T("로그인할 때 자동으로 열기"), #selector(toggleLoginItem)))
-        addConnectItem(to: menu)
-        menu.addItem(updateMenuItem())
+        menu.addItem(.separator())
+        addGroupMenus(to: menu)
         menu.addItem(.separator())
         menu.addItem(menuItem(T("종료"), #selector(quit)))
         return menu
+    }
+
+    /// 메뉴 글 폭 상한 — 긴 세션 이름 때문에 메뉴가 넓어지지 않게
+    private func shortened(_ text: String, _ limit: Int = 28) -> String {
+        text.count <= limit ? text : String(text.prefix(limit - 1)).trimmingCharacters(in: .whitespaces) + "…"
+    }
+
+    /// 누를 수 없는 흐린 머리줄(「세션」「남은 한도」)
+    private func menuHeader(_ title: String) -> NSMenuItem {
+        let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+        item.isEnabled = false
+        return item
+    }
+
+    /// 「왼쪽 ⇥ 오른쪽」: 오른쪽 값은 흐리게, 같은 자리에 오른쪽 정렬(탭)
+    private func rowTitle(_ left: String, _ right: String?, dimmed: Bool = false) -> NSAttributedString {
+        let font = NSFont.menuFont(ofSize: 0)
+        let style = NSMutableParagraphStyle()
+        style.tabStops = [NSTextTab(textAlignment: .right, location: 250)]
+        let text = NSMutableAttributedString(string: left, attributes: [
+            .font: font, .paragraphStyle: style, .foregroundColor: dimmed ? NSColor.disabledControlTextColor : NSColor.labelColor,
+        ])
+        if let right {
+            text.append(NSAttributedString(string: "\t" + right, attributes: [
+                .font: font, .paragraphStyle: style, .foregroundColor: NSColor.secondaryLabelColor,
+            ]))
+        }
+        return text
+    }
+
+    /// 세션 줄 앞의 작은 점(주황 Claude, 초록 Codex)
+    private func toolDot(_ tool: SessionTool) -> NSImage {
+        let color = tool == .claude ? NSColor(srgbRed: 0xD9 / 255, green: 0x77 / 255, blue: 0x57 / 255, alpha: 1)
+                                    : NSColor(srgbRed: 0x10 / 255, green: 0xA3 / 255, blue: 0x7F / 255, alpha: 1)
+        return NSImage(size: NSSize(width: 10, height: 10), flipped: false) { rect in
+            color.setFill()
+            NSBezierPath(ovalIn: rect.insetBy(dx: 1.5, dy: 1.5)).fill()
+            return true
+        }
+    }
+
+    /// 「Claude  5시간 94% · 주간 14%」(모델별 줄은 빼고), 오른쪽에 확인 시각
+    private func summaryItem(_ name: String, _ snap: ProviderSnapshot, now: Date) -> NSMenuItem {
+        let windows = snap.windows.filter { $0.name == nil }
+        let text = windows.isEmpty ? "\(name) · \(snap.message ?? T("값이 없습니다"))"
+            : "\(name)  " + windows.map { "\($0.label) \($0.leftPercent(now: now))%" }.joined(separator: " · ")
+        let item = NSMenuItem(title: shortened(text, 40), action: nil, keyEquivalent: "")
+        item.attributedTitle = rowTitle(shortened(text, 40), snap.observedAt.map(clock), dimmed: true)
+        item.isEnabled = false
+        if text.count > 40 { item.toolTip = text }
+        return item
+    }
+
+    /// 하위 메뉴 항목(오른쪽에 지금 값을 흐리게)
+    private func groupItem(_ title: String, _ value: String?, _ submenu: NSMenu) -> NSMenuItem {
+        let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+        if let value { item.attributedTitle = rowTitle(title, value) }
+        item.submenu = submenu
+        return item
+    }
+
+    @objc private func openSessionItem(_ item: NSMenuItem) {
+        guard let id = item.representedObject as? String, let s = model.sessions.first(where: { $0.id == id }) else { return }
+        SessionOpener.open(s)
     }
 
     // MARK: 자동 업데이트
@@ -3175,66 +3256,115 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
         return item
     }
 
-    /// 「Claude 보이기」「ChatGPT 보이기」「세션 보이기」「칸 순서」 — 앞뒤를 구분선으로 묶는다
-    private func addShownItems(to menu: NSMenu) {
-        menu.addItem(.separator())
-        menu.addItem(menuItem(T("Claude 보이기"), #selector(toggleClaude)))
-        menu.addItem(menuItem(T("ChatGPT 보이기"), #selector(toggleCodex)))
-        menu.addItem(menuItem(T("세션 보이기"), #selector(toggleSessions)))
-        menu.addItem(orderMenuItem())
-        menu.addItem(menuItem(T("모델별 한도 보이기 (Fable 등)"), #selector(toggleModelDisplay)))
+    /// 보기·모양·알림·설정 묶음(오른쪽 클릭·Dock·앱 메뉴가 같이 쓴다)
+    private func addGroupMenus(to menu: NSMenu) {
+        menu.addItem(viewMenuItem())
         menu.addItem(appearanceMenuItem())
-        menu.addItem(languageMenuItem())
-        menu.addItem(.separator())
-        menu.addItem(menuItem(T("한도 알림"), #selector(toggleAlerts)))
-        menu.addItem(menuItem(T("모델별 한도도 알림"), #selector(toggleModelAlerts)))
+        menu.addItem(alertsMenuItem())
+        menu.addItem(settingsMenuItem())
     }
 
-    /// 「칸 순서」 — 고를 수 있는 순서를 다 늘어놓고 지금 것에 체크(체크는 validateMenuItem 이 붙인다)
+    /// 보기: 어떤 칸을 보일지, 칸 순서, 모두 접기·펼치기
+    private func viewMenuItem() -> NSMenuItem {
+        let submenu = NSMenu()
+        submenu.addItem(menuItem(T("세션"), #selector(toggleSessions)))
+        submenu.addItem(menuItem("Claude", #selector(toggleClaude)))
+        submenu.addItem(menuItem("ChatGPT", #selector(toggleCodex)))
+        submenu.addItem(menuItem(T("모델별 한도 (Fable 등)"), #selector(toggleModelDisplay)))
+        submenu.addItem(.separator())
+        submenu.addItem(orderMenuItem())
+        let expand = menuItem(T("모두 펼치기"), #selector(foldAll(_:)))
+        expand.tag = 0
+        submenu.addItem(expand)
+        let collapse = menuItem(T("모두 접기"), #selector(foldAll(_:)))
+        collapse.tag = 1
+        submenu.addItem(collapse)
+        return groupItem(T("보기"), nil, submenu)
+    }
+
+    /// 칸 순서: 지금 순서를 보여 주고, 누른 칸을 한 칸 위로(맨 위 칸은 흐리게 — validateMenuItem)
     private func orderMenuItem() -> NSMenuItem {
         let submenu = NSMenu()
-        for order in Pane.orders {
-            let item = menuItem(order.map(\.title).joined(separator: " → "), #selector(chooseOrder(_:)))
-            item.representedObject = order.map(\.rawValue)
+        submenu.addItem(menuHeader(T("지금: {0}", model.order.map(\.title).joined(separator: " → "))))
+        for (index, pane) in model.order.enumerated() {
+            let item = menuItem(T("{0} 위로", pane.title), #selector(moveOrderUp(_:)))
+            item.tag = index
             submenu.addItem(item)
         }
-        let item = NSMenuItem(title: T("칸 순서"), action: nil, keyEquivalent: "")
-        item.submenu = submenu
-        return item
+        return groupItem(T("칸 순서"), nil, submenu)
     }
 
+    @objc private func moveOrderUp(_ item: NSMenuItem) {
+        let index = item.tag
+        guard index > 0, index < model.order.count else { return }
+        var order = model.order
+        order.swapAt(index - 1, index)
+        model.order = order
+        UserDefaults.standard.set(order.map(\.rawValue), forKey: Pane.orderKey)
+        afterUpdate()  // 칸 높이가 달라도 아래 모서리를 그대로 두고 맞춘다
+    }
+
+    @objc private func foldAll(_ item: NSMenuItem) {
+        let fold = item.tag == 1
+        model.foldSessions = fold
+        model.foldClaude = fold
+        model.foldCodex = fold
+        for key in [Shown.foldSessionsKey, Shown.foldClaudeKey, Shown.foldCodexKey] { UserDefaults.standard.set(fold, forKey: key) }
+        model.hovered = nil
+        afterUpdate()
+    }
+
+    /// 모양: 표시 방식, 그리고 지금 모드에 맞는 것만(메뉴 막대면 크기, 떠 있는 창이면 투명도·창 크기·글자 크기)
     private func appearanceMenuItem() -> NSMenuItem {
         let submenu = NSMenu()
-        // 표시 방식·메뉴 막대 크기(Windows 판 「표시 방식」·「작업 표시줄 크기」)
-        for (title, labels, values, action) in [
-            (T("표시 방식"), [T("떠 있는 창"), T("메뉴 막대 (간단 모드)")], [0, 1], #selector(chooseDisplayMode(_:))),
-            (T("메뉴 막대 크기"), [T("작게"), T("크게")], [75, 100], #selector(chooseMenuBarSize(_:))),
-        ] {
-            if !submenu.items.isEmpty { submenu.addItem(.separator()) }
-            let header = NSMenuItem(title: title, action: nil, keyEquivalent: "")
-            header.isEnabled = false
-            submenu.addItem(header)
-            for (label, value) in zip(labels, values) {
-                let item = menuItem(label, action)
+        submenu.addItem(menuHeader(T("표시 방식")))
+        for (label, value) in zip([T("떠 있는 창"), T("메뉴 막대 (간단 모드)")], [0, 1]) {
+            let item = menuItem(label, #selector(chooseDisplayMode(_:)))
+            item.tag = value
+            submenu.addItem(item)
+        }
+        submenu.addItem(.separator())
+        if Display.mode == 1 {
+            submenu.addItem(menuHeader(T("메뉴 막대 크기")))
+            for (label, value) in zip([T("작게"), T("크게")], [75, 100]) {
+                let item = menuItem(label, #selector(chooseMenuBarSize(_:)))
                 item.tag = value
                 submenu.addItem(item)
             }
-        }
-        for setting in PetSetting.allCases {
-            if !submenu.items.isEmpty { submenu.addItem(.separator()) }
-            let header = NSMenuItem(title: setting.title, action: nil, keyEquivalent: "")
-            header.isEnabled = false
-            submenu.addItem(header)
-            for (label, value) in zip(setting.labels, setting.values) {
-                let item = menuItem(label, #selector(chooseAppearance(_:)))
-                item.representedObject = setting.rawValue
-                item.tag = value
-                submenu.addItem(item)
+        } else {
+            for setting in PetSetting.allCases {
+                let choices = NSMenu()
+                for (label, value) in zip(setting.labels, setting.values) {
+                    let item = menuItem(label, #selector(chooseAppearance(_:)))
+                    item.representedObject = setting.rawValue
+                    item.tag = value
+                    choices.addItem(item)
+                }
+                let current = zip(setting.labels, setting.values).first { $0.1 == model.appearance[setting] }?.0
+                submenu.addItem(groupItem(setting.title, current, choices))
             }
         }
-        let item = NSMenuItem(title: T("모양"), action: nil, keyEquivalent: "")
-        item.submenu = submenu
-        return item
+        return groupItem(T("모양"), Display.mode == 1 ? T("메뉴 막대") : T("떠 있는 창"), submenu)
+    }
+
+    /// 알림: 한도 알림, 모델별 한도도 알림
+    private func alertsMenuItem() -> NSMenuItem {
+        let submenu = NSMenu()
+        submenu.addItem(menuItem(T("한도 알림"), #selector(toggleAlerts)))
+        submenu.addItem(menuItem(T("모델별 한도도 알림"), #selector(toggleModelAlerts)))
+        return groupItem(T("알림"), enabled ? T("켬") : T("끔"), submenu)
+    }
+
+    /// 설정: 로그인 항목, Claude Code 연결, 언어, 위치 초기화, 업데이트 확인
+    private func settingsMenuItem() -> NSMenuItem {
+        let submenu = NSMenu()
+        submenu.addItem(menuItem(T("로그인할 때 자동으로 열기"), #selector(toggleLoginItem)))
+        addConnectItem(to: submenu)
+        submenu.addItem(languageMenuItem())
+        submenu.addItem(.separator())
+        submenu.addItem(menuItem(T("위치 초기화"), #selector(resetPosition)))
+        submenu.addItem(updateMenuItem())
+        return groupItem(T("설정"), nil, submenu)
     }
 
     @objc private func chooseDisplayMode(_ item: NSMenuItem) { setDisplayMode(item.tag) }
@@ -3278,15 +3408,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
         refreshAll()  // 값에 붙은 안내 글도 새 언어로 다시 만든다
         model.objectWillChange.send()
         afterUpdate()
-    }
-
-    @objc private func chooseOrder(_ sender: NSMenuItem) {
-        guard let names = sender.representedObject as? [String] else { return }
-        let order = names.compactMap(Pane.init(rawValue:))
-        guard order.count == Pane.standard.count, order != model.order else { return }
-        model.order = order
-        UserDefaults.standard.set(names, forKey: Pane.orderKey)
-        afterUpdate()  // 칸 높이가 달라도 아래 모서리를 그대로 두고 맞춘다
     }
 
     @objc private func toggleClaude() { setShown(claude: !model.showClaude, codex: model.showCodex) }
@@ -3527,19 +3648,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
     /// 앱이 앞에 있을 때 위쪽 메뉴 막대에 나오는 메뉴(⌘R 새로고침, ⌘Q 종료)
     private func buildMainMenu() {
         let appMenu = NSMenu()
-        appMenu.addItem(menuItem(T("지금 새로고침"), #selector(refreshAll), key: "r"))
-        appMenu.addItem(menuItem(T("사용 추이…"), #selector(openTrend)))
-        appMenu.addItem(menuItem(T("위치 초기화"), #selector(resetPosition)))
-        addShownItems(to: appMenu)
-        appMenu.addItem(menuItem(T("로그인할 때 자동으로 열기"), #selector(toggleLoginItem)))
-        appMenu.addItem(updateMenuItem())
-        appMenu.addItem(.separator())
-        appMenu.addItem(menuItem(T("AI 사용량 종료"), #selector(quit), key: "q"))
+        appMenu.delegate = self
+        fillAppMenu(appMenu)
         let appItem = NSMenuItem()
         appItem.submenu = appMenu
         let mainMenu = NSMenu()
         mainMenu.addItem(appItem)
         NSApp.mainMenu = mainMenu
+    }
+
+    private func fillAppMenu(_ appMenu: NSMenu) {
+        appMenu.removeAllItems()
+        appMenu.addItem(menuItem(T("지금 새로고침"), #selector(refreshAll), key: "r"))
+        appMenu.addItem(menuItem(T("사용 추이…"), #selector(openTrend)))
+        appMenu.addItem(.separator())
+        addGroupMenus(to: appMenu)
+        appMenu.addItem(.separator())
+        appMenu.addItem(menuItem(T("AI 사용량 종료"), #selector(quit), key: "q"))
+    }
+
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        if menu === NSApp.mainMenu?.items.first?.submenu { fillAppMenu(menu) }
     }
 
     /// Dock 아이콘을 누르면 창을 맨 앞으로(다른 데스크톱에 있다가 돌아왔을 때 등)
@@ -3549,17 +3678,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
     }
 
     /// Dock 아이콘 오른쪽 클릭 메뉴(「종료」는 macOS 가 붙여 준다)
-    func applicationDockMenu(_ sender: NSApplication) -> NSMenu? {
-        let menu = NSMenu()
-        menu.addItem(menuItem(T("지금 새로고침"), #selector(refreshAll)))
+$1        menu.addItem(menuItem(T("지금 새로고침"), #selector(refreshAll)))
         menu.addItem(menuItem(T("사용 추이…"), #selector(openTrend)))
-        menu.addItem(menuItem(T("위치 초기화"), #selector(resetPosition)))
-        addShownItems(to: menu)
-        menu.addItem(menuItem(T("로그인할 때 자동으로 열기"), #selector(toggleLoginItem)))
-        addConnectItem(to: menu)
-        menu.addItem(updateMenuItem())
-        return menu
-    }
+        menu.addItem(.separator())
+        addGroupMenus(to: menu)$2
 
     /// 시스템 설정 → 일반 → 로그인 항목에 이 앱을 넣고 뺀다
     @objc private func toggleLoginItem() {
@@ -3609,8 +3731,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
         case #selector(chooseAppearance(_:)):
             guard let key = menuItem.representedObject as? String, let setting = PetSetting(rawValue: key) else { return false }
             menuItem.state = model.appearance[setting] == menuItem.tag ? .on : .off
-        case #selector(chooseOrder(_:)):
-            menuItem.state = (menuItem.representedObject as? [String]) == model.order.map(\.rawValue) ? .on : .off
+        case #selector(moveOrderUp(_:)):
+            return menuItem.tag > 0  // 맨 위 칸은 더 올릴 수 없다
+        case #selector(foldAll(_:)):
+            let folds = [model.foldSessions, model.foldClaude, model.foldCodex]
+            return menuItem.tag == 1 ? !folds.allSatisfy { $0 } : folds.contains(true)
         case #selector(chooseLanguage(_:)):
             menuItem.state = (menuItem.representedObject as? String) == L10n.choice ? .on : .off
         case #selector(manualCheckForUpdate):

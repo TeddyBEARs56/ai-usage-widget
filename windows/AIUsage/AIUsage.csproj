@@ -15,7 +15,7 @@
     <Product>AI 사용량</Product>
     <AssemblyTitle>AI 사용량</AssemblyTitle>
     <Description>Claude·ChatGPT(Codex) 사용 한도를 화면 위에 띄워 둔다</Description>
-    <Version>1.4.2</Version>
+    <Version>1.4.3</Version>
     <InvariantGlobalization>false</InvariantGlobalization>
     <SatelliteResourceLanguages>ko</SatelliteResourceLanguages>
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
