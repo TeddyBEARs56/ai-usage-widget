@@ -15,7 +15,7 @@ Claude 와 ChatGPT(Codex) 사용 한도를 화면 위에 계속 띄워 두는 �
 | | 버전 | 받기 | 설치 |
 |---|---|---|---|
 | 맥 (macOS 14 이상, 애플 칩·인텔) | 1.8 | [AIUsage-mac-1.8.zip](https://github.com/TeddyBEARs56/ai-usage-widget/releases/download/mac-v1.8/AIUsage-mac-1.8.zip) | 압축을 풀고 「읽어 주세요 (Read me).txt」대로: 터미널에 `zsh ` 를 치고 `설치.sh` 를 끌어다 놓은 뒤 Enter |
-| Windows 10·11 (64비트) | 1.4.2 | [AIUsage.exe](https://github.com/TeddyBEARs56/ai-usage-widget/releases/download/windows-v1.4.2/AIUsage.exe) | 실행 → 「Windows의 PC 보호」가 뜨면 **추가 정보 → 실행** → 「이 PC에 설치할까요?」 **예** |
+| Windows 10·11 (64비트) | 1.4.3 | [AIUsage.exe](https://github.com/TeddyBEARs56/ai-usage-widget/releases/download/windows-v1.4.3/AIUsage.exe) | 실행 → 「Windows의 PC 보호」가 뜨면 **추가 정보 → 실행** → 「이 PC에 설치할까요?」 **예** |
 
 한 번 깔면 그 뒤로는 앱이 새 판을 알아서 받는다([자동 업데이트](#자동-업데이트)). 지난 판은 [Releases](https://github.com/TeddyBEARs56/ai-usage-widget/releases). 위 링크는 `release.sh` 가 새 판을 올릴 때 고친다.
 
