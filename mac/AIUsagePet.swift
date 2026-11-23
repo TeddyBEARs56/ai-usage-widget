@@ -2441,7 +2441,7 @@ final class MenuBarGauge: NSObject, NSViewToolTipOwner {
     struct Group { let tint: NSColor; let rings: [Ring] }
 
     /// 그릴 것 하나(왼쪽 끝 x). background 는 회사 색 캡슐(색, 너비)
-    fileprivate enum Mark { case badge, background(NSColor, CGFloat), ring(Int?) }
+    fileprivate enum Mark { case badge, background(NSColor, CGFloat), ring(Int?, NSColor) }
     struct Layout {
         fileprivate var marks: [(x: CGFloat, mark: Mark)] = []
         var hits: [(x: CGFloat, width: CGFloat, tip: String)] = []
@@ -2500,7 +2500,8 @@ final class MenuBarGauge: NSObject, NSViewToolTipOwner {
 
     /// 자리 잡기 — 회사마다 회사 색 캡슐 배경 안에 원들을 놓는다(1.9.2 부터. 그 전에는 회사 색 점과 회사 사이 구분선 —
     /// Windows 판 작업 표시줄은 지금도 그렇다). 배경 높이 = 메뉴 막대 높이 - 4pt(작게는 그 75%), 원 지름 = 배경 높이 - 4pt
-    /// (위아래 2pt 안쪽, 캡슐 끝 반원과 원이 같은 중심). 30pt 메뉴 막대에서 크게는 배경 26pt·원 22pt
+    /// (위아래 2pt 안쪽). 1.9.3 부터 캡슐 양 끝을 원 지름의 30% 씩 더 늘려 회사끼리·옆 아이콘과 떨어져 보이게 한다.
+    /// 30pt 메뉴 막대에서 크게는 배경 26pt·원 22pt·양 끝 9pt. 원 안쪽은 회사 색을 한 단계 진하게 칠한다
     static func layout(groups: [Group], waiting: Int, size: Int, barHeight: CGFloat) -> Layout {
         var l = Layout()
         l.plate = max(14, ((barHeight - 4) * CGFloat(size) / 100).rounded())
@@ -2516,7 +2517,7 @@ final class MenuBarGauge: NSObject, NSViewToolTipOwner {
             l.hits.append((x, l.badge, T("입력이 필요한 세션 {0}개", waiting)))
             x += l.badge + l.gap
         }
-        let inset = (l.plate - l.ring) / 2
+        let inset = (l.plate - l.ring) / 2 + (l.ring * 0.3).rounded()  // 캡슐 끝에서 첫 원·끝 원까지
         var first = true
         for group in groups where !group.rings.isEmpty {
             if !first { x += l.gap }
@@ -2526,7 +2527,7 @@ final class MenuBarGauge: NSObject, NSViewToolTipOwner {
             var rx = x + inset
             for (index, ring) in group.rings.enumerated() {
                 if index > 0 { rx += l.inner }
-                l.marks.append((rx, .ring(ring.left)))
+                l.marks.append((rx, .ring(ring.left, group.tint)))
                 l.hits.append((rx, l.ring, ring.tip))
                 rx += l.ring
             }
@@ -2536,16 +2537,16 @@ final class MenuBarGauge: NSObject, NSViewToolTipOwner {
         return l
     }
 
-    /// 그리기(dark: 메뉴 막대가 어두운지). 밝은 메뉴 막대면 글자·테두리를 어둡게, 색은 진하게(Windows 판과 같은 값)
-    static func draw(_ l: Layout, dark: Bool) {
+    /// 그리기. 1.9.2 까지는 메뉴 막대가 밝으면 글자·테두리를 어둡게 했지만, 1.9.3 부터 원이 늘 불투명한 캡슐 위라 한 가지 색
+    static func draw(_ l: Layout) {
         func rgb(_ hex: Int, _ alpha: CGFloat = 1) -> NSColor {
             NSColor(srgbRed: CGFloat(hex >> 16 & 0xFF) / 255, green: CGFloat(hex >> 8 & 0xFF) / 255, blue: CGFloat(hex & 0xFF) / 255, alpha: alpha)
         }
-        let text = dark ? rgb(0xF2F2F4) : rgb(0x1E1E20)
-        let track = dark ? NSColor(white: 1, alpha: 60 / 255) : NSColor(white: 0, alpha: 45 / 255)
+        // 원은 늘 진한 회사 색 위에 있으므로(1.9.3 부터) 메뉴 막대가 밝든 어둡든 흰 숫자·밝은 남은 % 색
+        let text = rgb(0xF2F2F4)
+        let track = NSColor(white: 1, alpha: 60 / 255)
         func status(_ left: Int) -> NSColor {
-            dark ? (left >= 50 ? rgb(0x30D158) : left >= 20 ? rgb(0xFFD60A) : rgb(0xFF453A))
-                 : (left >= 50 ? rgb(0x1F9D47) : left >= 20 ? rgb(0xB88600) : rgb(0xD92D20))
+            left >= 50 ? rgb(0x30D158) : left >= 20 ? rgb(0xFFD60A) : rgb(0xFF453A)
         }
         let mid = l.size.height / 2
         let centered = NSMutableParagraphStyle()
@@ -2564,11 +2565,14 @@ final class MenuBarGauge: NSObject, NSViewToolTipOwner {
                 NSBezierPath(ovalIn: rect).fill()
                 label("!", in: rect, size: l.badge * 0.72, color: rgb(0x1E1E20))
             case .background(let color, let width):
-                // 회사 색을 반쯤 비치게: 어두운 메뉴 막대 50%, 밝은 메뉴 막대 38%(원의 남은 % 색이 묻히지 않을 만큼)
-                color.withAlphaComponent(dark ? 0.5 : 0.38).setFill()
+                // 회사 색을 불투명하게(1.9.3 부터. 1.9.2 는 반쯤 비쳤다)
+                color.setFill()
                 NSBezierPath(roundedRect: NSRect(x: x, y: mid - l.plate / 2, width: width, height: l.plate),
                              xRadius: l.plate / 2, yRadius: l.plate / 2).fill()
-            case .ring(let left):
+            case .ring(let left, let tint):
+                // 원 안쪽은 회사 색을 진하게(검정 45% 섞음) — 캡슐과 같은 색 계열이면서 남은 % 고리(초록 캡슐 위 초록 포함)와 흰 숫자가 또렷하게
+                (tint.blended(withFraction: 0.45, of: .black) ?? tint).setFill()
+                NSBezierPath(ovalIn: NSRect(x: x, y: mid - l.ring / 2, width: l.ring, height: l.ring)).fill()
                 let box = NSRect(x: x + l.stroke / 2, y: mid - l.ring / 2 + l.stroke / 2, width: l.ring - l.stroke, height: l.ring - l.stroke)
                 let base = NSBezierPath(ovalIn: box)
                 base.lineWidth = l.stroke
@@ -2599,10 +2603,8 @@ final class MenuBarGauge: NSObject, NSViewToolTipOwner {
             + groups.map { $0.rings.map { "\($0.left ?? -1)" }.joined(separator: ",") }.joined(separator: ";")
         guard key != drawnKey else { return }
         drawnKey = key
-        // 그릴 때마다 메뉴 막대가 어두운지 본다(바탕 화면에 따라 바뀐다)
         button.image = NSImage(size: l.size, flipped: false) { _ in
-            let dark = NSAppearance.currentDrawing().bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-            Self.draw(l, dark: dark)
+            Self.draw(l)
             return true
         }
         item.length = l.size.width
@@ -4284,7 +4286,7 @@ private func fillSnapshotSample(_ model: UsageModel) {
     ]
 }
 
-/// --gauge-snapshot <png> [--size 75|100] [--light] [--bar <pt>]: 메뉴 막대 게이지 그림(보기 시험용, 예시 값).
+/// --gauge-snapshot <png> [--size 75|100] [--light] [--bar <pt>]: 메뉴 막대 게이지 그림(보기 시험용, 예시 값). --light 는 밝은 메뉴 막대 바탕.
 /// 메뉴 막대 높이는 이 맥의 실제 높이, --bar 로 바꿀 수 있다.
 @MainActor func saveGaugeSnapshot(to path: String, size: Int, dark: Bool, bar: CGFloat) {
     _ = NSApplication.shared
@@ -4309,7 +4311,7 @@ private func fillSnapshotSample(_ model: UsageModel) {
     (dark ? NSColor(white: 0.16, alpha: 1) : NSColor(white: 0.93, alpha: 1)).setFill()
     NSRect(x: 0, y: 0, width: width, height: bar).fill()
     NSGraphicsContext.current?.cgContext.translateBy(x: margin, y: 0)
-    MenuBarGauge.draw(layout, dark: dark)
+    MenuBarGauge.draw(layout)
     NSGraphicsContext.restoreGraphicsState()
     guard let png = rep.representation(using: .png, properties: [:]) else { exit(1) }
     do { try png.write(to: URL(fileURLWithPath: path)); print(path) } catch { fputs("저장 실패: \(error)\n", stderr); exit(1) }
