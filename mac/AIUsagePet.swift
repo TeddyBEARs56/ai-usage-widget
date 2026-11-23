@@ -2437,16 +2437,16 @@ func roundedMask(radius: CGFloat) -> NSImage {
 final class MenuBarGauge: NSObject, NSViewToolTipOwner {
     /// 원 하나: 마우스를 올리면 보일 글과 남은 %(값이 없으면 nil)
     struct Ring { let tip: String; let left: Int? }
-    /// 회사 하나: 앞의 색 점과 원들
-    struct Group { let dot: NSColor; let rings: [Ring] }
+    /// 회사 하나: 회사 색(원들 뒤에 까는 배경)과 원들
+    struct Group { let tint: NSColor; let rings: [Ring] }
 
-    /// 그릴 것 하나(왼쪽 끝 x)
-    fileprivate enum Mark { case badge, separator, dot(NSColor), ring(Int?) }
+    /// 그릴 것 하나(왼쪽 끝 x). background 는 회사 색 캡슐(색, 너비)
+    fileprivate enum Mark { case badge, background(NSColor, CGFloat), ring(Int?) }
     struct Layout {
         fileprivate var marks: [(x: CGFloat, mark: Mark)] = []
         var hits: [(x: CGFloat, width: CGFloat, tip: String)] = []
         var size = NSSize.zero
-        var ring: CGFloat = 0, gap: CGFloat = 0, dot: CGFloat = 0, badge: CGFloat = 0, stroke: CGFloat = 0
+        var ring: CGFloat = 0, gap: CGFloat = 0, inner: CGFloat = 0, plate: CGFloat = 0, badge: CGFloat = 0, stroke: CGFloat = 0
     }
 
     private let item: NSStatusItem
@@ -2498,12 +2498,15 @@ final class MenuBarGauge: NSObject, NSViewToolTipOwner {
         return max(NSStatusBar.system.thickness, measured)
     }
 
-    /// 자리 잡기 — Windows 판 Render 와 같은 비율(원 지름 = 메뉴 막대 높이 - 6pt, 작게는 그 75%)
+    /// 자리 잡기 — 회사마다 회사 색 캡슐 배경 안에 원들을 놓는다(1.9.2 부터. 그 전에는 회사 색 점과 회사 사이 구분선 —
+    /// Windows 판 작업 표시줄은 지금도 그렇다). 배경 높이 = 메뉴 막대 높이 - 4pt(작게는 그 75%), 원 지름 = 배경 높이 - 4pt
+    /// (위아래 2pt 안쪽, 캡슐 끝 반원과 원이 같은 중심). 30pt 메뉴 막대에서 크게는 배경 26pt·원 22pt
     static func layout(groups: [Group], waiting: Int, size: Int, barHeight: CGFloat) -> Layout {
         var l = Layout()
-        l.ring = max(12, ((barHeight - 6) * CGFloat(size) / 100).rounded())
+        l.plate = max(14, ((barHeight - 4) * CGFloat(size) / 100).rounded())
+        l.ring = l.plate - 4
         l.gap = max(2, (l.ring * 0.22).rounded())
-        l.dot = max(4, (l.ring * 0.2).rounded())
+        l.inner = max(2, (l.ring * 0.14).rounded())
         l.stroke = max(1.5, l.ring * 0.1)
         l.badge = max(10, (l.ring * 0.62).rounded())
         let pad: CGFloat = 2
@@ -2513,22 +2516,23 @@ final class MenuBarGauge: NSObject, NSViewToolTipOwner {
             l.hits.append((x, l.badge, T("입력이 필요한 세션 {0}개", waiting)))
             x += l.badge + l.gap
         }
-        for group in groups {
-            if let last = l.marks.last, case .badge = last.mark {} else if !l.marks.isEmpty {
-                x += l.gap
-                l.marks.append((x, .separator))
-                x += 1 + l.gap
-            }
-            l.marks.append((x, .dot(group.dot)))
-            x += l.dot + l.gap
+        let inset = (l.plate - l.ring) / 2
+        var first = true
+        for group in groups where !group.rings.isEmpty {
+            if !first { x += l.gap }
+            first = false
+            let width = inset * 2 + CGFloat(group.rings.count) * l.ring + CGFloat(group.rings.count - 1) * l.inner
+            l.marks.append((x, .background(group.tint, width)))
+            var rx = x + inset
             for (index, ring) in group.rings.enumerated() {
-                if index > 0 { x += l.gap }
-                l.marks.append((x, .ring(ring.left)))
-                l.hits.append((x, l.ring, ring.tip))
-                x += l.ring
+                if index > 0 { rx += l.inner }
+                l.marks.append((rx, .ring(ring.left)))
+                l.hits.append((rx, l.ring, ring.tip))
+                rx += l.ring
             }
+            x += width
         }
-        l.size = NSSize(width: max(x + pad, pad * 2 + l.ring), height: barHeight)
+        l.size = NSSize(width: max(x + pad, pad * 2 + l.plate), height: barHeight)
         return l
     }
 
@@ -2559,12 +2563,11 @@ final class MenuBarGauge: NSObject, NSViewToolTipOwner {
                 rgb(0xFF9F0A).setFill()
                 NSBezierPath(ovalIn: rect).fill()
                 label("!", in: rect, size: l.badge * 0.72, color: rgb(0x1E1E20))
-            case .separator:
-                track.setFill()
-                NSRect(x: x, y: mid - l.ring * 0.3, width: 1, height: l.ring * 0.6).fill()
-            case .dot(let color):
-                color.setFill()
-                NSBezierPath(ovalIn: NSRect(x: x, y: mid - l.dot / 2, width: l.dot, height: l.dot)).fill()
+            case .background(let color, let width):
+                // 회사 색을 반쯤 비치게: 어두운 메뉴 막대 50%, 밝은 메뉴 막대 38%(원의 남은 % 색이 묻히지 않을 만큼)
+                color.withAlphaComponent(dark ? 0.5 : 0.38).setFill()
+                NSBezierPath(roundedRect: NSRect(x: x, y: mid - l.plate / 2, width: width, height: l.plate),
+                             xRadius: l.plate / 2, yRadius: l.plate / 2).fill()
             case .ring(let left):
                 let box = NSRect(x: x + l.stroke / 2, y: mid - l.ring / 2 + l.stroke / 2, width: l.ring - l.stroke, height: l.ring - l.stroke)
                 let base = NSBezierPath(ovalIn: box)
@@ -3550,7 +3553,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
                                   left: w.leftPercent(now: now))
             }
             if rings.isEmpty { rings = [MenuBarGauge.Ring(tip: "\(name) · \(snap.message ?? T("값이 없습니다"))", left: nil)] }
-            return MenuBarGauge.Group(dot: NSColor(color), rings: rings)
+            return MenuBarGauge.Group(tint: NSColor(color), rings: rings)
         }
         let groups = model.order.compactMap { pane -> MenuBarGauge.Group? in
             switch pane {
@@ -4289,7 +4292,7 @@ private func fillSnapshotSample(_ model: UsageModel) {
     fillSnapshotSample(model)
     let now = model.now
     func group(_ name: String, _ snap: ProviderSnapshot, _ color: Color) -> MenuBarGauge.Group {
-        MenuBarGauge.Group(dot: NSColor(color), rings: snap.visibleWindows(showModels: true).map {
+        MenuBarGauge.Group(tint: NSColor(color), rings: snap.visibleWindows(showModels: true).map {
             MenuBarGauge.Ring(tip: name, left: $0.leftPercent(now: now))
         })
     }
