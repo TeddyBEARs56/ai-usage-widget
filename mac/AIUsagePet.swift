@@ -369,7 +369,7 @@ enum ClaudeUsageCommand {
     static var resultPath: String { cacheDir + "/claude/" + fileName }
     static var logPath: String { cacheDir + "/claude-usage.log" }
     static var disabledPath: String { cacheDir + "/claude-usage-disabled" }
-    private static var workDir: String { cacheDir + "/claude-usage" }
+    static var workDir: String { cacheDir + "/claude-usage" }
 
     /// 대화가 이어질 때 너무 자주 묻지 않게: 두 번 사이 최소 간격
     static let minInterval: TimeInterval = 60
@@ -1263,7 +1263,7 @@ final class ClaudeSessionReader {
             guard let obj = readJSONObject(dir + "/" + file),
                   let pid = number(obj["pid"]).flatMap({ $0.isFinite && $0 >= 1 && $0 <= Double(Int32.max) ? pid_t($0) : nil }),
                   Self.alive(pid, procStart: obj["procStart"] as? String) else { continue }  // 꺼진 세션이 남긴 파일은 건너뛴다
-            if let kind = obj["kind"] as? String, kind != "interactive" { continue }  // claude -p(이 앱의 /usage 조회 등)는 빼고
+            if Self.isBackground(obj) { continue }  // 사람이 열지 않은 실행(이 앱의 /usage 조회, claude -p 등)은 빼고
             let sessionId = obj["sessionId"] as? String ?? (file as NSString).deletingPathExtension
             let cwd = obj["cwd"] as? String ?? ""
             let changedAt = number(obj["statusUpdatedAt"]).map { Date(timeIntervalSince1970: $0 / 1000) } ?? now
@@ -1322,6 +1322,16 @@ final class ClaudeSessionReader {
         let liveIds = Set(seen.map { String($0.split(separator: ":", maxSplits: 1).last ?? "") })
         titles = titles.filter { liveIds.contains($0.key) }
         return result
+    }
+
+    /// 사람이 열지 않고 뒤에서 도는 실행인가 — 목록에 넣지 않는다(Windows 판과 같은 규칙).
+    /// claude -p 도 kind 는 interactive 로 적히므로 kind 만으로는 못 가린다: 실행 방식(entrypoint)이 sdk-cli 이고
+    /// 데스크톱 앱 대화 표시(hostSessionId)가 없으면 뒤에서 도는 것. 이 앱의 /usage 조회 폴더에서 돈 것도 뺀다
+    static func isBackground(_ obj: [String: Any]) -> Bool {
+        if let kind = obj["kind"] as? String, kind != "interactive" { return true }
+        if obj["entrypoint"] as? String == "sdk-cli", obj["hostSessionId"] == nil { return true }
+        guard let cwd = obj["cwd"] as? String, !cwd.isEmpty else { return false }
+        return (cwd as NSString).standardizingPath == (ClaudeUsageCommand.workDir as NSString).standardizingPath
     }
 
     /// 그 pid 가 아직 Claude Code 인가(실행 파일 경로에 claude — 맥의 Claude Code 는 실행 파일 이름이 판 번호다).
@@ -2480,6 +2490,14 @@ final class MenuBarGauge: NSObject, NSViewToolTipOwner {
         item.menu = nil
     }
 
+    /// 실제 메뉴 막대 높이(pt). NSStatusBar.system.thickness 는 메뉴 막대가 30pt 인 macOS 27 에서도 22 를 돌려줘서
+    /// 게이지가 그 높이에 맞춰 작게(원 지름 16pt, 숫자 7pt) 그려졌다. 화면 맨 위에서 쓸 수 있는 영역까지의 거리로 잰다.
+    /// 메뉴 막대를 자동으로 숨겨 잴 수 없으면 thickness 를 쓴다.
+    static var barHeight: CGFloat {
+        let measured = NSScreen.screens.map { $0.frame.maxY - $0.visibleFrame.maxY }.filter { $0 > 0 }.max() ?? 0
+        return max(NSStatusBar.system.thickness, measured)
+    }
+
     /// 자리 잡기 — Windows 판 Render 와 같은 비율(원 지름 = 메뉴 막대 높이 - 6pt, 작게는 그 75%)
     static func layout(groups: [Group], waiting: Int, size: Int, barHeight: CGFloat) -> Layout {
         var l = Layout()
@@ -2572,8 +2590,9 @@ final class MenuBarGauge: NSObject, NSViewToolTipOwner {
 
     func update(groups: [Group], waiting: Int, size: Int) {
         guard let button = item.button else { return }
-        let l = Self.layout(groups: groups, waiting: waiting, size: size, barHeight: NSStatusBar.system.thickness)
-        let key = "\(size)|\(waiting)|" + l.hits.map { "\($0.x):\($0.tip)" }.joined(separator: "|")
+        let bar = Self.barHeight
+        let l = Self.layout(groups: groups, waiting: waiting, size: size, barHeight: bar)
+        let key = "\(bar)|\(size)|\(waiting)|" + l.hits.map { "\($0.x):\($0.tip)" }.joined(separator: "|")
             + groups.map { $0.rings.map { "\($0.left ?? -1)" }.joined(separator: ",") }.joined(separator: ";")
         guard key != drawnKey else { return }
         drawnKey = key
@@ -4262,8 +4281,9 @@ private func fillSnapshotSample(_ model: UsageModel) {
     ]
 }
 
-/// --gauge-snapshot <png> [--size 75|100] [--light]: 메뉴 막대 게이지 그림(보기 시험용, 예시 값)
-@MainActor func saveGaugeSnapshot(to path: String, size: Int, dark: Bool) {
+/// --gauge-snapshot <png> [--size 75|100] [--light] [--bar <pt>]: 메뉴 막대 게이지 그림(보기 시험용, 예시 값).
+/// 메뉴 막대 높이는 이 맥의 실제 높이, --bar 로 바꿀 수 있다.
+@MainActor func saveGaugeSnapshot(to path: String, size: Int, dark: Bool, bar: CGFloat) {
     _ = NSApplication.shared
     let model = UsageModel()
     fillSnapshotSample(model)
@@ -4273,7 +4293,6 @@ private func fillSnapshotSample(_ model: UsageModel) {
             MenuBarGauge.Ring(tip: name, left: $0.leftPercent(now: now))
         })
     }
-    let bar: CGFloat = 24
     let layout = MenuBarGauge.layout(groups: [group("Claude", model.claude, claudeTint), group("ChatGPT", model.codex, codexTint)],
                                      waiting: 1, size: size, barHeight: bar)
     let scale: CGFloat = 4, margin: CGFloat = 8
@@ -4385,9 +4404,11 @@ enum Main {
             return
         }
         if let i = args.firstIndex(of: "--gauge-snapshot") {
-            guard args.indices.contains(i + 1) else { fputs("--gauge-snapshot <png> [--size 75|100] [--light]\n", stderr); exit(2) }
+            guard args.indices.contains(i + 1) else { fputs("--gauge-snapshot <png> [--size 75|100] [--light] [--bar <pt>]\n", stderr); exit(2) }
             let size = args.firstIndex(of: "--size").flatMap { args.indices.contains($0 + 1) ? Int(args[$0 + 1]) : nil } ?? 100
-            saveGaugeSnapshot(to: args[i + 1], size: size == 75 ? 75 : 100, dark: !args.contains("--light"))
+            let bar = args.firstIndex(of: "--bar").flatMap { args.indices.contains($0 + 1) ? Double(args[$0 + 1]) : nil }
+            saveGaugeSnapshot(to: args[i + 1], size: size == 75 ? 75 : 100, dark: !args.contains("--light"),
+                              bar: bar.map { CGFloat($0) } ?? MenuBarGauge.barHeight)
             return
         }
         if args.contains("--connect") {  // 메뉴의 「Claude Code 에 연결」과 같은 일(터미널에서)
